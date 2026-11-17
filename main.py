@@ -178,23 +178,51 @@ class Studio(QMainWindow):
             self.lora_list.addItem(item)
     def import_files(self,is_lora):
         paths,_=QFileDialog.getOpenFileNames(self,"Импорт моделей","","Safetensors (*.safetensors)")
-        if not paths:return
-        dest=self.folder(is_lora);dest.mkdir(parents=True,exist_ok=True)
+        if not paths:
+            return
+        key="loras" if is_lora else "checkpoints"
+        dest_name=QFileDialog.getExistingDirectory(self,"Выбери папку хранения моделей (желательно папку ComfyUI/models/"+key+")",str(self.folder(is_lora)))
+        if not dest_name:
+            return
+        dest=Path(dest_name)
         try:
+            dest.mkdir(parents=True,exist_ok=True)
+            copied=0
             for path in paths:
-                src=Path(path);target=dest/src.name
-                if src.resolve()!=target.resolve():shutil.copy2(src,target)
+                src=Path(path)
+                target=dest/src.name
+                if src.resolve()==target.resolve() or target.exists():
+                    continue
+                needed=src.stat().st_size+256*1024*1024
+                free=shutil.disk_usage(dest).free
+                if free<needed:
+                    raise OSError("Недостаточно свободного места в "+str(dest)+". Необходимо примерно "+f"{needed/1024**3:.1f}"+" ГБ, доступно "+f"{free/1024**3:.1f}"+" ГБ.")
+                try:
+                    with src.open("rb") as source, target.open("xb") as output:
+                        shutil.copyfileobj(source,output,4*1024*1024)
+                except OSError:
+                    target.unlink(missing_ok=True)
+                    raise
+                copied+=1
+            self.config[key]=str(dest)
+            CONFIG.write_text(json.dumps(self.config,ensure_ascii=False,indent=2),encoding="utf8")
+            (self.lora_folder if is_lora else self.check_folder).setText(str(dest))
             self.refresh()
-        except OSError as exc:QMessageBox.warning(self,"Ошибка",str(exc))
+            QMessageBox.information(self,"Импорт","Импортировано файлов: "+str(copied)+"\\nПапка: "+str(dest)+"\\nЕсли ComfyUI использует другую папку, он не увидит модели.")
+        except OSError as exc:
+            QMessageBox.warning(self,"Ошибка импорта",str(exc)+"\\nВыбери папку на диске с большим количеством свободного места.")
     def save(self):
         self.config.update(url=self.url.text().strip(),checkpoints=self.check_folder.text().strip(),loras=self.lora_folder.text().strip())
         CONFIG.write_text(json.dumps(self.config,ensure_ascii=False,indent=2),encoding="utf8")
         self.refresh();QMessageBox.information(self,"Naisar AI","Настройки сохранены")
     def test(self):
+        address=self.url.text().strip().rstrip("/")
         try:
-            r=requests.get(self.url.text().rstrip('/')+"/system_stats",timeout=4);r.raise_for_status()
-            QMessageBox.information(self,"ComfyUI","Подключение успешно")
-        except requests.RequestException as exc:QMessageBox.warning(self,"ComfyUI",str(exc))
+            r=requests.get(address+"/system_stats",timeout=4)
+            r.raise_for_status()
+            QMessageBox.information(self,"ComfyUI","Соединение установлено. ComfyUI доступен.")
+        except requests.RequestException:
+            QMessageBox.warning(self,"ComfyUI не запущен","Невозможно подключиться к "+address+".\\n\\nЗапусти ComfyUI локально, дождись сообщения о запуске сервера и нажми «Проверить ComfyUI» снова.\\n\\nComfyUI не входит в установщик Naisar AI Studio v0.1.")
     def generate(self):
         if not self.ckpt.currentText() or not self.prompt.toPlainText().strip():
             QMessageBox.warning(self,"Генерация","Выбери checkpoint и введи промпт");return
@@ -207,8 +235,13 @@ class Studio(QMainWindow):
         self.runbtn.setEnabled(True);self.status.setText("Сохранено: "+path)
         pix=QPixmap(path);self.preview.setPixmap(pix.scaled(520,320,Qt.KeepAspectRatio,Qt.SmoothTransformation))
     def failed(self,msg):
-        self.runbtn.setEnabled(True);self.status.setText("Ошибка: "+msg)
-        QMessageBox.warning(self,"Ошибка генерации",msg)
+        self.runbtn.setEnabled(True)
+        if "10061" in msg or "Connection refused" in msg or "Failed to establish a new connection" in msg or "Max retries exceeded" in msg:
+            message="Локальный движок ComfyUI недоступен.\\n\\n1. Установи и запусти ComfyUI.\\n2. Дождись запуска сервера на 127.0.0.1:8188.\\n3. Проверь адрес в разделе «Настройки».\\n4. Нажми «Проверить ComfyUI» и повтори генерацию.\\n\\nОбрати внимание: ComfyUI не входит в текущий установщик Naisar AI Studio."
+        else:
+            message=msg
+        self.status.setText("Ошибка генерации: "+message.split("\\n")[0])
+        QMessageBox.warning(self,"Ошибка генерации",message)
     def show_gallery(self):
         self.gallery.clear()
         for path in sorted(GALLERY.glob("*.png"),key=lambda p:p.stat().st_mtime,reverse=True):
